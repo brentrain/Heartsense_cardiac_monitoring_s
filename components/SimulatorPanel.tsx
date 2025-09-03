@@ -12,17 +12,19 @@
 import React, { useState } from 'react';
 import PatientManagementPanel from './PatientManagementPanel';
 import RhythmControlPanel from './RhythmControlPanel';
-import { Patient, CardiacRhythm, PacerSettings } from '../types';
+import { Patient, CardiacRhythm, PacerSettings, PatientSpecificSimData } from '../types';
 
 interface SimulatorPanelProps {
     patients: Patient[];
     selectedPatientId: string | null;
     selectedPatient: Patient | null;
+    selectedPatientSimData: PatientSpecificSimData | null;
     allRhythms: CardiacRhythm[];
     onDeletePatient: (patientId: string) => void;
     onSelectPatient: (patientId: string) => void;
     onSetRhythm: (rhythm: CardiacRhythm) => void;
     onUpdatePacerSettings: (settings: Partial<PacerSettings>) => void;
+    onToggleEcgLeadOff: () => void;
     onClose: () => void;
 }
 
@@ -30,11 +32,13 @@ const SimulatorPanel: React.FC<SimulatorPanelProps> = ({
     patients,
     selectedPatientId,
     selectedPatient,
+    selectedPatientSimData,
     allRhythms,
     onDeletePatient,
     onSelectPatient,
     onSetRhythm,
     onUpdatePacerSettings,
+    onToggleEcgLeadOff,
     onClose
 }) => {
   const [isClosing, setIsClosing] = useState(false);
@@ -110,9 +114,11 @@ const SimulatorPanel: React.FC<SimulatorPanelProps> = ({
                 />
                 <RhythmControlPanel
                   selectedPatient={selectedPatient}
+                  selectedPatientSimData={selectedPatientSimData}
                   allRhythms={allRhythms}
                   onSetRhythm={handleRhythmSelectionAndClose}
                   onUpdatePacerSettings={onUpdatePacerSettings}
+                  onToggleEcgLeadOff={onToggleEcgLeadOff}
                 />
               </div>
           </div>

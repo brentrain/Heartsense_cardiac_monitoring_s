@@ -185,6 +185,7 @@ export interface PatientSpecificSimData {
   lastTempUpdate?: number; 
   lastSpo2UpdateAttempt?: number; 
   nonNsrRhythmStartTime?: number | null; 
+  isLeadOff: boolean; // Changed from optional for ECG lead off simulation
   // For new waveforms
   spo2PulsePatternBuffer: number[];
   spo2PulseBufferIndex: number;
@@ -207,5 +208,6 @@ export interface CardiacDataSimulator {
   setPatients: React.Dispatch<React.SetStateAction<Patient[]>>;
   updatePatientPacingSettings: (patientId: string, settings: Partial<PacerSettings>) => void;
   updatePatientNoiseSignatures: (patientId: string, signatures: string[]) => void;
-  provideAlarmFeedback: (patientId: string, feedbackType: Omit<AlarmFeedbackType, 'not_reviewed'>) => void;
+  provideAlarmFeedback: (patientId: string, feedbackType: Omit<AlarmFeedbackType, 'not_reviewed'>, alertSeverity: AlertSeverity) => void;
+  toggleEcgLeadOff: (patientId: string) => void; // Added for manual control
 }

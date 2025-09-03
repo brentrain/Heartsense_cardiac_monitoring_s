@@ -48,7 +48,7 @@ export const INITIAL_PATIENTS: Patient[] = [
 ];
 
 export const SIMULATION_VITALS_INTERVAL_MS = 1000; // Interval for checking alerts, logging vitals, and updating HR trend.
-export const SIMULATION_ECG_INTERVAL_MS = 50;   // Update ECG, HR, and SpO2 every 50ms for real-time feel.
+export const SIMULATION_ECG_INTERVAL_MS = 25;   // Update ECG, HR, and SpO2 every 25ms for smoother feel (40Hz).
 export const BP_UPDATE_INTERVAL_MS = 5 * 60 * 1000; // Update BP every 5 minutes.
 export const TEMP_UPDATE_INTERVAL_MS = 10 * 60 * 1000; // Update Temperature every 10 minutes.
 export const RR_UPDATE_INTERVAL_MS = 2 * 60 * 1000; // Update RR every 2 minutes.

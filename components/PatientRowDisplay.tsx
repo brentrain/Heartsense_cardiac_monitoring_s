@@ -1,4 +1,3 @@
-
 /**
  * @file PatientRowDisplay.tsx
  * @description
@@ -14,7 +13,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { LineChart, Line, ResponsiveContainer, YAxis, XAxis } from 'recharts';
+import { LineChart, Line, ResponsiveContainer, YAxis, XAxis, Area } from 'recharts';
 import { Patient, CardiacMetrics, ECGDataPoint, Alert, AlertSeverity, LoggedVitalSign, PatientSpecificSimData, HeartSenseAIRiskLevel, HeartSenseAIState, AlarmFeedbackType } from '../types';
 import { METRIC_UNITS, STATUS_COLORS, ALERT_THRESHOLDS, RHYTHM_PARAMS, HEART_ICON_COLORS, HEARTSENSE_RISK_LEVEL_TEXT_COLORS, HEARTSENSE_RISK_LEVEL_BG_COLORS, INITIAL_HEARTSENSE_AI_STATE, ECG_SPO2_BASELINE_VALUE, RESP_WAVEFORM_COLOR, SPO2_WAVEFORM_COLOR } from '../constants';
 import VitalsHistoryModal from '@/components/VitalsHistoryModal';
@@ -26,7 +25,7 @@ interface PatientRowDisplayProps {
   onSelect: () => void;
   onDeletePatient: (patientId: string, patientName: string) => void;
   onAcknowledgeWarnings?: (patientId: string) => void; 
-  onProvideFeedback: (patientId: string, feedbackType: Omit<AlarmFeedbackType, 'not_reviewed'>) => void;
+  onProvideFeedback: (patientId: string, feedbackType: Omit<AlarmFeedbackType, 'not_reviewed'>, alertSeverity: AlertSeverity) => void;
   onUpdatePatientNoiseSignatures: (patientId: string, signatures: string[]) => void;
 }
 
@@ -98,15 +97,13 @@ const PatientRowDisplay: React.FC<PatientRowDisplayProps> = ({
   isSelected,
   onSelect,
   onDeletePatient,
-  onAcknowledgeWarnings,
   onProvideFeedback,
 }) => {
-  const { metrics, ecgData, spo2WaveData, respWaveData, alerts, loggedVitals, acknowledgedAlertIds = new Set(), lastBeatTimestamp, heartSenseAIState } = patientSimData;
+  const { metrics, ecgData, spo2WaveData, respWaveData, alerts, loggedVitals, acknowledgedAlertIds = new Set(), lastBeatTimestamp, heartSenseAIState, isLeadOff } = patientSimData;
   
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [isBeating, setIsBeating] = useState(false);
   const lastBeatRef = useRef(lastBeatTimestamp);
-  const [warningDismissTimer, setWarningDismissTimer] = useState<number | null>(null);
 
   // Effect for the visual heart "beat" animation on the heart rate monitor.
   useEffect(() => {
@@ -120,22 +117,7 @@ const PatientRowDisplay: React.FC<PatientRowDisplayProps> = ({
 
   const unacknowledgedAlerts = alerts.filter(alert => !acknowledgedAlertIds.has(alert.id));
   const unacknowledgedWarningAlerts = unacknowledgedAlerts.filter(alert => alert.severity === AlertSeverity.WARNING);
-  
-  // Effect to auto-dismiss warning alerts after a timeout period.
-  useEffect(() => {
-    if (unacknowledgedWarningAlerts.length > 0 && onAcknowledgeWarnings) {
-      if (warningDismissTimer) clearTimeout(warningDismissTimer);
-      const timerId = window.setTimeout(() => {
-        if (onAcknowledgeWarnings) onAcknowledgeWarnings(patient.id);
-        setWarningDismissTimer(null);
-      }, 10000); 
-      setWarningDismissTimer(timerId);
-    } else if (warningDismissTimer) {
-      clearTimeout(warningDismissTimer);
-      setWarningDismissTimer(null);
-    }
-    return () => { if (warningDismissTimer) clearTimeout(warningDismissTimer); };
-  }, [unacknowledgedWarningAlerts, patient.id, onAcknowledgeWarnings]);
+  const unacknowledgedCriticalAlerts = unacknowledgedAlerts.filter(alert => alert.severity === AlertSeverity.CRITICAL);
   
   // Determines the color for a metric's value based on whether it breaches any thresholds.
   const getThresholdForStatus = (metricValue: number, metricType: keyof typeof ALERT_THRESHOLDS, personalizedMetricThresholds?: any): string => {
@@ -158,7 +140,7 @@ const PatientRowDisplay: React.FC<PatientRowDisplayProps> = ({
 
   const currentRhythmParams = RHYTHM_PARAMS[patient.activeRhythm];
   const isLethalRhythmActive = currentRhythmParams?.isLethal || false;
-  const hasUnacknowledgedCriticalAlert = unacknowledgedAlerts.some(a => a.severity === AlertSeverity.CRITICAL);
+  const hasUnacknowledgedCriticalAlert = unacknowledgedCriticalAlerts.length > 0;
   const hasUnacknowledgedWarningAlert = unacknowledgedWarningAlerts.length > 0;
   
   // Determine the color of the central heart icon based on alert severity.
@@ -167,12 +149,10 @@ const PatientRowDisplay: React.FC<PatientRowDisplayProps> = ({
   else if (hasUnacknowledgedWarningAlert) heartFillClass = HEART_ICON_COLORS.warning;
   
   // Dynamic styling for the row based on selection and risk status.
-  const rowBgClass = isSelected ? 'bg-slate-700/80' : 'bg-slate-800 hover:bg-slate-700/50';
+  const rowBgClass = isSelected ? 'bg-slate-700/80' : 'bg-slate-800/80 hover:bg-slate-700/70';
   const stopPropagation = (e: React.MouseEvent) => e.stopPropagation();
-  const handleFeedback = (feedbackType: Omit<AlarmFeedbackType, 'not_reviewed'>) => {
-    if (warningDismissTimer) clearTimeout(warningDismissTimer);
-    setWarningDismissTimer(null);
-    onProvideFeedback(patient.id, feedbackType);
+  const handleFeedback = (feedbackType: Omit<AlarmFeedbackType, 'not_reviewed'>, severity: AlertSeverity) => {
+    onProvideFeedback(patient.id, feedbackType, severity);
   };
 
   const ecgLineColor = currentRhythmParams?.ecgLineColor || RHYTHM_PARAMS.NSR.ecgLineColor;
@@ -183,12 +163,12 @@ const PatientRowDisplay: React.FC<PatientRowDisplayProps> = ({
     heartSenseAIState?.riskLevel === HeartSenseAIRiskLevel.CRITICAL ? 'ring-2 ring-red-500' 
     : heartSenseAIState?.riskLevel === HeartSenseAIRiskLevel.HIGH ? 'ring-1 ring-orange-400' 
     : isSelected ? 'ring-2 ring-sky-500' 
-    : '';
+    : 'ring-1 ring-slate-700/80';
 
   return (
     <>
       <div
-        className={`flex flex-col md:flex-row p-3 sm:p-4 rounded-xl shadow-lg border border-slate-700/80 transition-all duration-200 cursor-pointer ${rowBgClass} ${riskRingClass}`}
+        className={`flex flex-col md:flex-row p-3 sm:p-4 rounded-xl shadow-lg transition-all duration-200 cursor-pointer ${rowBgClass} ${riskRingClass}`}
         role="article" 
         aria-labelledby={`patient-name-${patient.id}`}
         onClick={onSelect}
@@ -243,10 +223,29 @@ const PatientRowDisplay: React.FC<PatientRowDisplayProps> = ({
         <div className="flex-grow min-w-0 px-0 md:px-4 mb-3 md:mb-0">
             <div className="relative h-20 w-full">
                <ResponsiveContainer width="100%" height="100%">
-                 <LineChart data={ecgData} margin={{ top: 2, right: 0, left: 0, bottom: 2 }}>
+                 <LineChart data={ecgData} margin={{ top: 5, right: 0, left: 0, bottom: 5 }}>
+                    <defs>
+                      <filter id={`ecgGlow-${patient.id}`} x="-50%" y="-50%" width="200%" height="200%">
+                          <feGaussianBlur in="SourceAlpha" stdDeviation="2.5" result="blur" />
+                          <feFlood floodColor={ecgLineColor} floodOpacity="0.8" result="color" />
+                          <feComposite in="color" in2="blur" operator="in" result="glow" />
+                          <feMerge>
+                              <feMergeNode in="glow" />
+                              <feMergeNode in="SourceGraphic" />
+                          </feMerge>
+                      </filter>
+                    </defs>
                    <YAxis domain={[-2.5, 3.5]} hide={true} />
                    <XAxis dataKey="time" hide={true} />
-                   <Line type="monotone" dataKey="value" stroke={ecgLineColor} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                   <Line 
+                    type="monotone" 
+                    dataKey="value" 
+                    stroke={ecgLineColor} 
+                    strokeWidth={2} 
+                    dot={false} 
+                    isAnimationActive={false} 
+                    filter={`url(#ecgGlow-${patient.id})`}
+                  />
                  </LineChart>
                </ResponsiveContainer>
                <div className="absolute top-1/2 left-2 sm:left-3 transform -translate-y-1/2 z-10 flex items-center justify-center pointer-events-none">
@@ -257,31 +256,51 @@ const PatientRowDisplay: React.FC<PatientRowDisplayProps> = ({
                     {metrics.heartRate}
                   </span>
                </div>
-                <div className="absolute bottom-1 right-2 text-xs text-white/80 font-semibold pointer-events-none">
-                     {isAbnormalRhythm && !pacerActive && <span>({currentRhythmParams?.displayName || patient.activeRhythm})</span>}
-                     {pacerActive && <span className="text-teal-400">(Pacing: {patient.pacerSettings?.mode} @ {patient.pacerSettings?.rate}bpm)</span>}
+                <div className="absolute bottom-1 right-2 text-xs text-white/80 font-semibold pointer-events-none" style={{ textShadow: '0 1px 3px #000' }}>
+                    {isLeadOff ? (
+                        <span className="text-sm sm:text-base font-bold text-red-500 animate-pulse">
+                            LEAD OFF
+                        </span>
+                    ) : (
+                        <>
+                            {isAbnormalRhythm && !pacerActive && <span>({currentRhythmParams?.displayName || patient.activeRhythm})</span>}
+                            {pacerActive && <span className="text-teal-400">(Pacing: {patient.pacerSettings?.mode} @ {patient.pacerSettings?.rate}bpm)</span>}
+                        </>
+                    )}
                 </div>
             </div>
              <div className="grid grid-cols-2 gap-x-3 mt-1">
               <div className="relative h-10 w-full">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={spo2WaveData} margin={{ top: 2, right: 0, left: 0, bottom: 2 }}>
-                      <YAxis domain={[0, 1.5]} hide={true} /> 
-                      <XAxis dataKey="time" hide={true} />
-                      <Line type="monotone" dataKey="value" stroke={SPO2_WAVEFORM_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} />
-                    </LineChart>
+                     <LineChart data={spo2WaveData} margin={{ top: 2, right: 0, left: 0, bottom: 2 }}>
+                        <defs>
+                          <linearGradient id={`spo2Gradient-${patient.id}`} x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={SPO2_WAVEFORM_COLOR} stopOpacity={0.4}/>
+                            <stop offset="95%" stopColor={SPO2_WAVEFORM_COLOR} stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <YAxis domain={[0, 1.5]} hide={true} /> 
+                        <XAxis dataKey="time" hide={true} />
+                        <Area type="monotone" dataKey="value" stroke={SPO2_WAVEFORM_COLOR} strokeWidth={2} fillOpacity={1} fill={`url(#spo2Gradient-${patient.id})`} isAnimationActive={false} />
+                      </LineChart>
                   </ResponsiveContainer>
-                 <span className="absolute top-0.5 left-1 text-[10px] font-semibold text-blue-400 pointer-events-none">SpO₂</span>
+                 <span className="absolute top-0.5 left-1 text-[10px] font-semibold text-blue-300 pointer-events-none" style={{textShadow: '0px 1px 4px rgba(0,0,0,0.9)'}}>SpO₂</span>
               </div>
               <div className="relative h-10 w-full">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={respWaveData} margin={{ top: 2, right: 0, left: 0, bottom: 2 }}>
+                      <defs>
+                          <linearGradient id={`respGradient-${patient.id}`} x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor={RESP_WAVEFORM_COLOR} stopOpacity={0.4}/>
+                              <stop offset="95%" stopColor={RESP_WAVEFORM_COLOR} stopOpacity={0}/>
+                          </linearGradient>
+                      </defs>
                       <YAxis domain={[-1.5, 1.5]} hide={true} />
                       <XAxis dataKey="time" hide={true} />
-                      <Line type="monotone" dataKey="value" stroke={RESP_WAVEFORM_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                      <Area type="monotone" dataKey="value" stroke={RESP_WAVEFORM_COLOR} strokeWidth={2} fillOpacity={1} fill={`url(#respGradient-${patient.id})`} isAnimationActive={false} />
                     </LineChart>
                   </ResponsiveContainer>
-                <span className="absolute top-0.5 left-1 text-[10px] font-semibold text-sky-400 pointer-events-none">Resp</span>
+                <span className="absolute top-0.5 left-1 text-[10px] font-semibold text-sky-300 pointer-events-none" style={{textShadow: '0px 1px 4px rgba(0,0,0,0.9)'}}>Resp</span>
               </div>
             </div>
         </div>
@@ -289,12 +308,24 @@ const PatientRowDisplay: React.FC<PatientRowDisplayProps> = ({
         {/* SECTION: AI & Inputs Column */}
         <div className="flex-shrink-0 w-full md:w-64 lg:w-72 pl-0 md:pl-4 md:border-l md:border-slate-700">
            <HeartSenseAIDisplay aiState={heartSenseAIState} />
+
+           {hasUnacknowledgedCriticalAlert && ( 
+            <div className="mt-2 space-x-2 flex">
+              <button onClick={(e) => { stopPropagation(e); handleFeedback('true_positive', AlertSeverity.CRITICAL); }} className="flex-1 py-1 px-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-500 text-white transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-400" aria-label={`Mark critical alerts as true positive`}>
+                Crit True ✔️
+              </button>
+              <button onClick={(e) => { stopPropagation(e); handleFeedback('false_positive', AlertSeverity.CRITICAL); }} className="flex-1 py-1 px-2 text-xs font-semibold rounded-md bg-red-600 hover:bg-red-500 text-white transition-colors focus:outline-none focus:ring-2 focus:ring-red-500" aria-label={`Mark critical alerts as false positive`}>
+                Crit False ❌
+              </button>
+            </div>
+           )}
+
            {hasUnacknowledgedWarningAlert && ( 
             <div className="mt-2 space-x-2 flex">
-              <button onClick={(e) => { stopPropagation(e); handleFeedback('true_positive'); }} className="flex-1 py-1 px-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-500 text-white transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-400" aria-label={`Mark warnings as true positive`}>
+              <button onClick={(e) => { stopPropagation(e); handleFeedback('true_positive', AlertSeverity.WARNING); }} className="flex-1 py-1 px-2 text-xs font-semibold rounded-md bg-emerald-600/80 hover:bg-emerald-600 text-white transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-400" aria-label={`Mark warnings as true positive`}>
                 Warn True ✔️
               </button>
-              <button onClick={(e) => { stopPropagation(e); handleFeedback('false_positive'); }} className="flex-1 py-1 px-2 text-xs font-semibold rounded-md bg-amber-500 hover:bg-amber-400 text-white transition-colors focus:outline-none focus:ring-2 focus:ring-amber-400" aria-label={`Mark warnings as false positive`}>
+              <button onClick={(e) => { stopPropagation(e); handleFeedback('false_positive', AlertSeverity.WARNING); }} className="flex-1 py-1 px-2 text-xs font-semibold rounded-md bg-amber-500 hover:bg-amber-400 text-white transition-colors focus:outline-none focus:ring-2 focus:ring-amber-400" aria-label={`Mark warnings as false positive`}>
                 Warn False ❌
               </button>
             </div>

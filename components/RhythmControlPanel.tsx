@@ -1,20 +1,24 @@
 
 import React from 'react';
-import { Patient, CardiacRhythm, PacerSettings } from '../types';
+import { Patient, CardiacRhythm, PacerSettings, PatientSpecificSimData } from '../types';
 import CategorizedRhythmMenu from '@/components/CategorizedRhythmMenu';
 
 interface RhythmControlPanelProps {
   selectedPatient: Patient | null;
+  selectedPatientSimData: PatientSpecificSimData | null;
   allRhythms: CardiacRhythm[];
   onSetRhythm: (rhythm: CardiacRhythm) => void;
   onUpdatePacerSettings: (settings: Partial<PacerSettings>) => void;
+  onToggleEcgLeadOff: () => void;
 }
 
 const RhythmControlPanel: React.FC<RhythmControlPanelProps> = ({
   selectedPatient,
+  selectedPatientSimData,
   allRhythms,
   onSetRhythm,
   onUpdatePacerSettings,
+  onToggleEcgLeadOff,
 }) => {
   if (!selectedPatient) {
     return (
@@ -26,6 +30,7 @@ const RhythmControlPanel: React.FC<RhythmControlPanelProps> = ({
   }
 
   const currentPacerSettings = selectedPatient.pacerSettings || { mode: 'Off', rate: 70 };
+  const isLeadOff = selectedPatientSimData?.isLeadOff || false;
 
   const handlePacerModeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     onUpdatePacerSettings({ mode: e.target.value as PacerSettings['mode'] });
@@ -62,6 +67,23 @@ const RhythmControlPanel: React.FC<RhythmControlPanelProps> = ({
         activeRhythm={selectedPatient.activeRhythm}
         onSetRhythm={onSetRhythm}
       />
+
+      {/* Technical Faults */}
+      <div className="border-t border-slate-700 pt-4 mt-4">
+          <h3 className="text-md font-medium text-slate-200 mb-2">Technical Faults</h3>
+          <button
+            onClick={onToggleEcgLeadOff}
+            disabled={!selectedPatient}
+            className={`w-full p-2 text-sm font-semibold rounded-md transition-colors duration-150 border focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-800
+              ${isLeadOff 
+                ? 'bg-red-600 text-white border-red-500 hover:bg-red-500 focus:ring-red-400' 
+                : 'bg-slate-600 text-slate-200 border-slate-500 hover:bg-slate-500 focus:ring-sky-500'
+              }
+              disabled:bg-slate-700 disabled:text-slate-500 disabled:border-slate-600 disabled:cursor-not-allowed`}
+          >
+            {isLeadOff ? 'Reconnect ECG Leads' : 'Simulate ECG Lead Off'}
+          </button>
+      </div>
 
       {/* Pacemaker Settings */}
       <div className="border-t border-slate-700 pt-4 mt-4">

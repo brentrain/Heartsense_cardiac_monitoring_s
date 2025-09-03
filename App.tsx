@@ -21,6 +21,7 @@ import CreateAccountScreen from '@/components/CreateAccountScreen';
 import AddPatientModal from '@/components/AddPatientModal';
 import ModifyPatientModal from '@/components/ModifyPatientModal';
 import ConnectMonitorModal from '@/components/ConnectMonitorModal';
+import AlertAudioHandler, { playRhythmChangeSound, initAudio } from '@/components/AlertAudioHandler';
 import { Patient, CardiacRhythm, UserCredentials, PacerSettings, PatientSpecificSimData, HeartSenseAIRiskLevel, AlarmFeedbackType, AlertSeverity } from './types';
 import { getDefaultMetrics, getInitialEcgData, getInitialSpo2Data, getInitialRespData, ALL_AVAILABLE_RHYTHMS, INITIAL_HEARTSENSE_AI_STATE, INITIAL_ALARM_FEEDBACK_LOG, RHYTHM_PARAMS, MockMonitor } from './constants';
 
@@ -56,6 +57,7 @@ const App: React.FC = () => {
     provideAlarmFeedback,
     updatePatientNoiseSignatures,
     updatePatientPacingSettings,
+    toggleEcgLeadOff,
   } = useCardiacDataSimulator(loggedInOrganizationName);
 
   // --- HARDCODED USER FOR DEMO ---
@@ -96,6 +98,23 @@ const App: React.FC = () => {
       }
     }
   }, []);
+
+  // SECTION: Audio Initialization Effect
+  // This effect sets up a one-time event listener to initialize the Web Audio API
+  // on the first user interaction (click), which is required by modern browsers
+  // to allow audio playback.
+  useEffect(() => {
+    const init = () => {
+      initAudio();
+      document.removeEventListener('click', init);
+    };
+    document.addEventListener('click', init);
+    
+    return () => {
+      document.removeEventListener('click', init);
+    };
+  }, []);
+
 
 
   // --- HANDLERS ---
@@ -201,59 +220,66 @@ const App: React.FC = () => {
 
   // SECTION: Patient Data Handlers
   
-  const handleSaveNewPatient = (patientData: Omit<Patient, 'id' | 'activeRhythm' | 'pacerSettings' | 'personalizedThresholds' | 'noiseSignatures' | 'source'>) => {
+  const handleSaveNewPatient = useCallback((patientData: Omit<Patient, 'id' | 'activeRhythm' | 'pacerSettings' | 'personalizedThresholds' | 'noiseSignatures' | 'source'>) => {
     addPatient(patientData);
     setIsAddPatientModalOpen(false);
-  };
+  }, [addPatient]);
   
-  const handleSaveModifiedPatient = (patientData: Patient) => {
+  const handleSaveModifiedPatient = useCallback((patientData: Patient) => {
     updatePatientDetails(patientData.id, patientData);
     setIsModifyPatientModalOpen(false);
-  }
+  }, [updatePatientDetails]);
 
-  const handleConnectAndAddPatient = (monitor: MockMonitor, connectionType: 'Network' | 'Bluetooth') => {
+  const handleConnectAndAddPatient = useCallback((monitor: MockMonitor, connectionType: 'Network' | 'Bluetooth') => {
       addPatient({
         ...monitor.patientData,
         room: monitor.location,
         codeStatus: 'FULL_CODE',
       }, `${connectionType}: ${monitor.model}`);
       setIsConnectMonitorModalOpen(false);
-  };
+  }, [addPatient]);
   
-  const handleDeletePatientInRow = (patientId: string, patientName: string) => {
-    if (window.confirm(`Are you sure you want to delete patient ${patientName}? This action cannot be undone.`)) {
+  const handleDeletePatientInRow = useCallback((patientId: string, patientName: string) => {
+    if (window.confirm("Are you sure you want to delete this patient? All data will be lost.")) {
       deletePatient(patientId);
     }
-  };
+  }, [deletePatient]);
 
-  const handleDeleteSelectedPatient = () => {
+  const handleDeleteSelectedPatient = useCallback(() => {
     if (selectedPatientId) {
         const patient = patients.find(p => p.id === selectedPatientId);
-        if (patient && window.confirm(`Are you sure you want to delete patient ${patient.name}? This action cannot be undone.`)) {
+        if (patient && window.confirm("Are you sure you want to delete this patient? All data will be lost.")) {
             deletePatient(selectedPatientId);
         }
     }
-  };
+  }, [selectedPatientId, patients, deletePatient]);
   
-  const handleSetRhythmForSelectedPatient = (rhythm: CardiacRhythm) => {
+  const handleSetRhythmForSelectedPatient = useCallback((rhythm: CardiacRhythm) => {
     if (selectedPatientId) {
+      playRhythmChangeSound();
       setPatientRhythm(selectedPatientId, rhythm);
     }
-  };
+  }, [selectedPatientId, setPatientRhythm]);
 
-  const handlePacerSettingsChangeForSelectedPatient = (settings: Partial<PacerSettings>) => {
+  const handlePacerSettingsChangeForSelectedPatient = useCallback((settings: Partial<PacerSettings>) => {
     if (selectedPatientId) {
       updatePatientPacingSettings(selectedPatientId, settings);
     }
-  };
+  }, [selectedPatientId, updatePatientPacingSettings]);
   
-  const handleAcknowledgeWarningsForPatient = (patientId: string) => {
+  const handleAcknowledgeWarningsForPatient = useCallback((patientId: string) => {
     acknowledgePatientAlerts(patientId, AlertSeverity.WARNING);
-  };
+  }, [acknowledgePatientAlerts]);
 
-  const toggleSimPanel = () => {
+  const handleToggleLeadOffForSelectedPatient = useCallback(() => {
+      if (selectedPatientId) {
+          toggleEcgLeadOff(selectedPatientId);
+      }
+  }, [selectedPatientId, toggleEcgLeadOff]);
+
+  const toggleSimPanel = useCallback(() => {
     setIsSimPanelVisible(prev => !prev);
-  };
+  }, []);
   
   // --- DERIVED DATA & DEFAULTS ---
   
@@ -279,9 +305,11 @@ const App: React.FC = () => {
     spo2PulseBufferIndex: 0,
     spo2NextPulseDue: false,
     respirationCyclePosition: 0,
+    isLeadOff: false,
   };
 
   const selectedPatientObject = patients.find(p => p.id === selectedPatientId) || null;
+  const selectedPatientSimData = simulationDataMap.get(selectedPatientId || '') || null;
 
   // --- RENDER LOGIC ---
 
@@ -306,7 +334,8 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-900 text-slate-200 relative">
+    <div className="min-h-screen flex flex-col text-slate-200 relative">
+      <AlertAudioHandler simulationDataMap={simulationDataMap} />
       <Header 
         organizationName={loggedInOrganizationName} 
         onLogout={handleLogout} 
@@ -325,11 +354,13 @@ const App: React.FC = () => {
           patients={patients}
           selectedPatientId={selectedPatientId}
           selectedPatient={selectedPatientObject}
+          selectedPatientSimData={selectedPatientSimData}
           onDeletePatient={deletePatient}
           onSelectPatient={selectPatient}
           allRhythms={ALL_AVAILABLE_RHYTHMS}
           onSetRhythm={handleSetRhythmForSelectedPatient}
           onUpdatePacerSettings={handlePacerSettingsChangeForSelectedPatient}
+          onToggleEcgLeadOff={handleToggleLeadOffForSelectedPatient}
           onClose={toggleSimPanel}
         />
       )}

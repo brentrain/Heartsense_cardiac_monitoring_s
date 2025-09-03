@@ -89,6 +89,7 @@ const createInitialPatientSimData = (patient: Patient): PatientSpecificSimData =
         lastRRUpdate: 0,
         lastSpo2UpdateAttempt: 0,
         nonNsrRhythmStartTime: patient.activeRhythm === 'NSR' ? null : Date.now(),
+        isLeadOff: false,
         spo2PulsePatternBuffer: [],
         spo2PulseBufferIndex: 0,
         spo2NextPulseDue: false,
@@ -127,11 +128,15 @@ const mockRunHeartSenseAIAnalysis = async (patient: Patient, simData: PatientSpe
         riskScore = generateRandomInRange(75, 90);
         riskLevel = HeartSenseAIRiskLevel.HIGH;
         const criticalAlert = unacknowledgedAlerts.find(a => a.severity === AlertSeverity.CRITICAL)!;
-        predictionReasoning = `High risk due to critical alert for ${criticalAlert.metric}.`;
+        const alertReason = patient.diagnosis === 'Congestive Heart Failure' && criticalAlert.metric.includes('SpO')
+            ? `High risk due to critical alert for ${criticalAlert.message}, indicating potential CHF decompensation.`
+            : `High risk due to critical alert for ${criticalAlert.metric}: ${criticalAlert.message}.`;
+        predictionReasoning = alertReason;
     } else if (patient.activeRhythm !== 'NSR' && !['SINUS_TACHYCARDIA', 'SINUS_BRADYCARDIA', 'FIRST_DEGREE_AV_BLOCK'].includes(patient.activeRhythm)) {
         riskScore = generateRandomInRange(50, 75);
         riskLevel = HeartSenseAIRiskLevel.MODERATE;
-        predictionReasoning = `Moderate risk due to sustained abnormal rhythm (${rhythmParams.displayName}).`;
+        const diagnosisContext = patient.diagnosis ? ` in patient with ${patient.diagnosis}` : '';
+        predictionReasoning = `Moderate risk due to sustained abnormal rhythm (${rhythmParams.displayName})${diagnosisContext}.`;
     } else if (hasWarningAlerts) {
         riskScore = generateRandomInRange(30, 50);
         riskLevel = HeartSenseAIRiskLevel.MODERATE;
@@ -166,6 +171,7 @@ export const useCardiacDataSimulator = (organizationName?: string | null): Cardi
     const [patients, setPatients] = useState<Patient[]>([]);
     const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
     const [simulationDataMap, setSimulationDataMap] = useState(new Map<string, PatientSpecificSimData>());
+    const isInitialLoad = useRef(true);
 
     // --- INITIALIZATION ---
     useEffect(() => {
@@ -180,7 +186,7 @@ export const useCardiacDataSimulator = (organizationName?: string | null): Cardi
             const storedData = localStorage.getItem(`cardiacMonitorData_${organizationName}`);
             if (storedData) {
                 const data = JSON.parse(storedData);
-                const loadedPatients = data.patients || INITIAL_PATIENTS;
+                const loadedPatients = data.patients ?? INITIAL_PATIENTS;
                 setPatients(loadedPatients);
                 
                 const newSimMap = new Map<string, PatientSpecificSimData>();
@@ -189,12 +195,11 @@ export const useCardiacDataSimulator = (organizationName?: string | null): Cardi
                     const simData = createInitialPatientSimData(p);
                     simData.loggedVitals = persistentData.loggedVitals || [];
                     simData.alarmFeedbackLog = persistentData.alarmFeedbackLog || [];
-                     // Restore the persisted AI state to prevent re-analysis on every load
                     if (persistentData.heartSenseAIState) {
                         simData.heartSenseAIState = {
                             ...persistentData.heartSenseAIState,
-                            isLoading: false, // Always reset loading state on app start
-                            error: null,      // Always clear stale errors on app start
+                            isLoading: false,
+                            error: null,
                         };
                     }
                     newSimMap.set(p.id, simData);
@@ -219,18 +224,20 @@ export const useCardiacDataSimulator = (organizationName?: string | null): Cardi
         } catch (e) {
             console.error("Failed to load data from localStorage", e);
             setPatients(INITIAL_PATIENTS); // Fallback
+        } finally {
+            isInitialLoad.current = false;
         }
     }, [organizationName]);
 
     useEffect(() => {
-        if (!organizationName) return;
+        if (!organizationName || isInitialLoad.current) return;
         try {
             const persistentPatientData: Record<string, PersistentPatientData> = {};
             simulationDataMap.forEach((simData, patientId) => {
                 persistentPatientData[patientId] = {
                     loggedVitals: simData.loggedVitals,
                     alarmFeedbackLog: simData.alarmFeedbackLog,
-                    heartSenseAIState: simData.heartSenseAIState, // Persist AI state
+                    heartSenseAIState: simData.heartSenseAIState,
                 };
             });
             const dataToStore = {
@@ -292,202 +299,203 @@ export const useCardiacDataSimulator = (organizationName?: string | null): Cardi
     useEffect(() => {
         // HIGH-FREQUENCY LOOP: ECG & WAVEFORMS
         const ecgIntervalId = setInterval(() => {
-            const now = Date.now();
             setSimulationDataMap(prevMap => {
-                const newMap = new Map(prevMap);
-                patients.forEach(patient => {
-                    let simData = newMap.get(patient.id);
-                    if (!simData) return;
+                const newMap = new Map<string, PatientSpecificSimData>();
+                for (const [patientId, currentSimData] of prevMap.entries()) {
+                    const patient = patients.find(p => p.id === patientId);
+                    if (!patient) continue;
 
-                    // Deep copy to prevent mutation issues, preserving the Set type
-                    simData = { 
-                        ...JSON.parse(JSON.stringify(simData)), 
-                        acknowledgedAlertIds: new Set(simData.acknowledgedAlertIds) 
-                    };
+                    let newSimData = { ...currentSimData };
+                    const now = Date.now();
+                    const pointsPerSecond = 1000 / SIMULATION_ECG_INTERVAL_MS;
 
+                    // Handle ECG Lead Off state
+                    if (newSimData.isLeadOff) {
+                        newSimData.metrics = { ...newSimData.metrics, heartRate: 0 };
+                        newSimData.ecgData = [...newSimData.ecgData.slice(1), { time: newSimData.ecgCurrentTime, value: 0 }];
+                        
+                        const respRateHz = newSimData.metrics.respiratoryRate / 60;
+                        const respCycleSeconds = respRateHz > 0 ? 1 / respRateHz : Infinity;
+                        const respCyclePoints = respCycleSeconds * pointsPerSecond;
+                        newSimData.respirationCyclePosition = (newSimData.respirationCyclePosition + 1) % respCyclePoints;
+                        const respValue = Math.sin((newSimData.respirationCyclePosition / respCyclePoints) * 2 * Math.PI) * RESP_AMPLITUDE;
+                        newSimData.respWaveData = [...newSimData.respWaveData.slice(1), { time: newSimData.ecgCurrentTime, value: respValue }];
+
+                        let spo2Value = ECG_SPO2_BASELINE_VALUE;
+                        if (newSimData.spo2PulseBufferIndex < newSimData.spo2PulsePatternBuffer.length) {
+                           const pulseProgress = newSimData.spo2PulseBufferIndex / SPO2_PULSE_POINTS_DURATION;
+                           const amplitude = (Math.sin(pulseProgress * Math.PI) * (newSimData.metrics.spo2 / 100));
+                           spo2Value += newSimData.spo2PulsePatternBuffer[newSimData.spo2PulseBufferIndex] * 0.5 * Math.max(0.5, amplitude);
+                           newSimData.spo2PulseBufferIndex++;
+                        } else {
+                           newSimData.spo2PulseBufferIndex = 0;
+                           newSimData.spo2PulsePatternBuffer = [];
+                           newSimData.spo2NextPulseDue = false;
+                        }
+                        newSimData.spo2WaveData = [...newSimData.spo2WaveData.slice(1), { time: newSimData.ecgCurrentTime, value: spo2Value }];
+                        
+                        newSimData.ecgCurrentTime++;
+                        newMap.set(patientId, newSimData);
+                        continue;
+                    }
+                    
                     const rhythmParams = RHYTHM_PARAMS[patient.activeRhythm];
                     const pacerSettings = patient.pacerSettings || { mode: 'Off', rate: 70 };
                     const pacerOn = pacerSettings.mode !== 'Off';
-
-                    let heartRate = simData.metrics.heartRate;
+                    let heartRate = newSimData.metrics.heartRate;
                     let nextBeatDue = false;
                     let isPacedBeat = false;
                     
-                    const pointsPerSecond = 1000 / SIMULATION_ECG_INTERVAL_MS;
-                    const rrIntervalPoints = heartRate > 0 ? Math.round((60 / heartRate) * pointsPerSecond) : Infinity;
-
-                    if (simData.nextRRIntervalPoints <= 0) {
+                    if (newSimData.nextRRIntervalPoints <= 0) {
                         nextBeatDue = true;
                         if (pacerOn && heartRate < pacerSettings.rate) {
-                            simData.currentTargetHeartRate = pacerSettings.rate;
+                            newSimData.currentTargetHeartRate = pacerSettings.rate;
                             isPacedBeat = true;
                         } else {
-                            simData.currentTargetHeartRate = rhythmParams.simulatedHR();
+                            newSimData.currentTargetHeartRate = rhythmParams.simulatedHR();
                         }
-                        const newRate = simData.currentTargetHeartRate;
-                        simData.nextRRIntervalPoints = newRate > 0 ? (60 / newRate) * pointsPerSecond : Infinity;
+                        const newRate = newSimData.currentTargetHeartRate;
+                        newSimData.nextRRIntervalPoints = newRate > 0 ? (60 / newRate) * pointsPerSecond : Infinity;
                     }
-                    simData.nextRRIntervalPoints--;
-
+                    newSimData.nextRRIntervalPoints--;
 
                     let currentPattern: number[] = [];
-                    let patternIndex = simData.ecgBufferIndex;
-                    
+                    let patternIndex = newSimData.ecgBufferIndex;
                     if (patternIndex > 0) {
-                        currentPattern = simData.ecgPatternBuffer;
+                        currentPattern = newSimData.ecgPatternBuffer;
                     } else if (nextBeatDue) {
                         let basePattern = rhythmParams.basePattern;
-                        // Handle Complex Rhythms
                         if(patient.activeRhythm === 'THIRD_DEGREE_AV_BLOCK'){
-                            if(now - simData.lastPWaveTime > 60000 / rhythmParams.atrialRate!){
-                                simData.ecgPatternBuffer = ECG_P_WAVE_PATTERN;
-                                simData.lastPWaveTime = now;
+                            if(now - newSimData.lastPWaveTime > 60000 / rhythmParams.atrialRate!){
+                                newSimData.ecgPatternBuffer = ECG_P_WAVE_PATTERN;
+                                newSimData.lastPWaveTime = now;
                             } else {
                                 basePattern = rhythmParams.basePattern;
                             }
                         }
-
-                        // Pacing logic
-                        if (isPacedBeat) {
-                            currentPattern = [...ECG_PACER_SPIKE_PATTERN, ...ECG_PACED_QRS_PATTERN];
-                        } else {
-                            currentPattern = basePattern;
-                        }
-
-                        simData.ecgPatternBuffer = currentPattern;
-                        simData.lastBeatTimestamp = now;
-                        simData.spo2NextPulseDue = true; 
+                        currentPattern = isPacedBeat ? [...ECG_PACER_SPIKE_PATTERN, ...ECG_PACED_QRS_PATTERN] : basePattern;
+                        newSimData.ecgPatternBuffer = currentPattern;
+                        newSimData.lastBeatTimestamp = now;
+                        newSimData.spo2NextPulseDue = rhythmParams.generatesQRS || isPacedBeat; 
                     }
-
 
                     const newValue = currentPattern[patternIndex] || 0;
-                    simData.ecgData = [...simData.ecgData.slice(1), { time: simData.ecgCurrentTime, value: newValue }];
-                    simData.ecgCurrentTime++;
+                    newSimData.ecgData = [...newSimData.ecgData.slice(1), { time: newSimData.ecgCurrentTime, value: newValue }];
+                    newSimData.ecgCurrentTime++;
+                    newSimData.ecgBufferIndex = patternIndex >= currentPattern.length - 1 ? 0 : patternIndex + 1;
+                    if (newSimData.ecgBufferIndex === 0) newSimData.ecgPatternBuffer = [];
 
-                    if (patternIndex >= currentPattern.length - 1) {
-                        simData.ecgBufferIndex = 0;
-                        simData.ecgPatternBuffer = [];
-                    } else {
-                        simData.ecgBufferIndex++;
-                    }
-
-                    // SpO2 Waveform
                     let spo2Value = ECG_SPO2_BASELINE_VALUE;
-                    if(simData.spo2NextPulseDue && simData.spo2PulseBufferIndex === 0){
-                        simData.spo2PulsePatternBuffer = ECG_SPO2_PULSE_PATTERN;
+                    if(newSimData.spo2NextPulseDue && newSimData.spo2PulseBufferIndex === 0){
+                        newSimData.spo2PulsePatternBuffer = ECG_SPO2_PULSE_PATTERN;
                     }
-                    if(simData.spo2PulseBufferIndex < simData.spo2PulsePatternBuffer.length){
-                        const pulseProgress = simData.spo2PulseBufferIndex / SPO2_PULSE_POINTS_DURATION;
-                        const amplitude = (Math.sin(pulseProgress * Math.PI) * (simData.metrics.spo2 / 100)); // Modulate amplitude by spo2
-                        spo2Value += simData.spo2PulsePatternBuffer[simData.spo2PulseBufferIndex] * 0.5 * Math.max(0.5, amplitude);
-                        simData.spo2PulseBufferIndex++;
+                    if(newSimData.spo2PulseBufferIndex < newSimData.spo2PulsePatternBuffer.length){
+                        const pulseProgress = newSimData.spo2PulseBufferIndex / SPO2_PULSE_POINTS_DURATION;
+                        const amplitude = (Math.sin(pulseProgress * Math.PI) * (newSimData.metrics.spo2 / 100));
+                        spo2Value += newSimData.spo2PulsePatternBuffer[newSimData.spo2PulseBufferIndex] * 0.5 * Math.max(0.5, amplitude);
+                        newSimData.spo2PulseBufferIndex++;
                     } else {
-                        simData.spo2PulseBufferIndex = 0;
-                        simData.spo2PulsePatternBuffer = [];
-                        simData.spo2NextPulseDue = false;
+                        newSimData.spo2PulseBufferIndex = 0;
+                        newSimData.spo2PulsePatternBuffer = [];
+                        newSimData.spo2NextPulseDue = false;
                     }
-                    simData.spo2WaveData = [...simData.spo2WaveData.slice(1), { time: simData.ecgCurrentTime, value: spo2Value }];
+                    newSimData.spo2WaveData = [...newSimData.spo2WaveData.slice(1), { time: newSimData.ecgCurrentTime, value: spo2Value }];
                     
-                    // Respiration Waveform
-                    const respRateHz = simData.metrics.respiratoryRate / 60;
-                    const respCycleSeconds = 1 / respRateHz;
+                    const respRateHz = newSimData.metrics.respiratoryRate / 60;
+                    const respCycleSeconds = respRateHz > 0 ? 1 / respRateHz : Infinity;
                     const respCyclePoints = respCycleSeconds * pointsPerSecond;
-                    simData.respirationCyclePosition = (simData.respirationCyclePosition + 1) % respCyclePoints;
-                    const respValue = Math.sin((simData.respirationCyclePosition / respCyclePoints) * 2 * Math.PI) * RESP_AMPLITUDE;
-                    simData.respWaveData = [...simData.respWaveData.slice(1), { time: simData.ecgCurrentTime, value: respValue }];
+                    newSimData.respirationCyclePosition = (newSimData.respirationCyclePosition + 1) % respCyclePoints;
+                    const respValue = Math.sin((newSimData.respirationCyclePosition / respCyclePoints) * 2 * Math.PI) * RESP_AMPLITUDE;
+                    newSimData.respWaveData = [...newSimData.respWaveData.slice(1), { time: newSimData.ecgCurrentTime, value: respValue }];
 
-                    newMap.set(patient.id, simData);
-                });
+                    newMap.set(patientId, newSimData);
+                }
                 return newMap;
             });
         }, SIMULATION_ECG_INTERVAL_MS);
+
 
         // LOW-FREQUENCY LOOP: VITALS, ALERTS, LOGGING, AI
         const vitalsIntervalId = setInterval(() => {
             const now = Date.now();
             setSimulationDataMap(prevMap => {
-                const newMap = new Map(prevMap);
-                patients.forEach(patient => {
-                    let simData = newMap.get(patient.id);
-                    if (!simData) return;
-                    
-                    // Deep copy to avoid mutation issues, preserving the Set type
-                    simData = { 
-                        ...JSON.parse(JSON.stringify(simData)), 
-                        acknowledgedAlertIds: new Set(simData.acknowledgedAlertIds) 
+                const newMap = new Map<string, PatientSpecificSimData>();
+                for (const [patientId, simData] of prevMap.entries()) {
+                    const patient = patients.find(p => p.id === patientId);
+                    if (!patient) {
+                        newMap.set(patientId, simData);
+                        continue;
                     };
                     
+                    let newSimData = { ...simData };
+                    let newMetrics = { ...newSimData.metrics };
+                    let newAlerts = [...newSimData.alerts];
+                    
+                    // NOTE: Random lead off logic is removed. It is now controlled manually via toggleEcgLeadOff.
+
                     const rhythmParams = RHYTHM_PARAMS[patient.activeRhythm];
                     
-                    // Update HR based on target rate
-                    const hrDiff = simData.currentTargetHeartRate - simData.metrics.heartRate;
-                    simData.metrics.heartRate += Math.sign(hrDiff) * Math.min(Math.abs(hrDiff), 2);
+                    const hrDiff = newSimData.currentTargetHeartRate - newMetrics.heartRate;
+                    newMetrics.heartRate = newMetrics.heartRate + Math.sign(hrDiff) * Math.min(Math.abs(hrDiff), 2);
                     
-                    // Update other vitals periodically
-                    if (now - (simData.lastBPUpdate || 0) > BP_UPDATE_INTERVAL_MS) {
-                        simData.metrics.bloodPressure.systolic += generateRandomInRange(-3, 3);
-                        simData.metrics.bloodPressure.diastolic += generateRandomInRange(-2, 2);
-                        simData.lastBPUpdate = now;
+                    if (now - (newSimData.lastBPUpdate || 0) > BP_UPDATE_INTERVAL_MS) {
+                        newMetrics.bloodPressure = {
+                            systolic: newMetrics.bloodPressure.systolic + generateRandomInRange(-3, 3),
+                            diastolic: newMetrics.bloodPressure.diastolic + generateRandomInRange(-2, 2)
+                        };
+                        newSimData.lastBPUpdate = now;
                     }
-                    if (now - (simData.lastTempUpdate || 0) > TEMP_UPDATE_INTERVAL_MS) {
-                        simData.metrics.temperature += generateRandomInRange(-0.1, 0.1, 1);
-                        simData.lastTempUpdate = now;
+                    if (now - (newSimData.lastTempUpdate || 0) > TEMP_UPDATE_INTERVAL_MS) {
+                        newMetrics.temperature = newMetrics.temperature + generateRandomInRange(-0.1, 0.1, 1);
+                        newSimData.lastTempUpdate = now;
                     }
-                    if (now - (simData.lastRRUpdate || 0) > RR_UPDATE_INTERVAL_MS) {
-                        simData.metrics.respiratoryRate += generateRandomInRange(-1, 1);
-                         simData.metrics.respiratoryRate = Math.max(8, Math.min(35, simData.metrics.respiratoryRate));
-                        simData.lastRRUpdate = now;
+                    if (now - (newSimData.lastRRUpdate || 0) > RR_UPDATE_INTERVAL_MS) {
+                        let newRR = newMetrics.respiratoryRate + generateRandomInRange(-1, 1);
+                        newMetrics.respiratoryRate = Math.max(8, Math.min(35, newRR));
+                        newSimData.lastRRUpdate = now;
                     }
 
-                    // Lethal rhythm effects
                     if (rhythmParams.isLethal) {
-                        simData.metrics.bloodPressure.systolic = 0;
-                        simData.metrics.bloodPressure.diastolic = 0;
-                        simData.metrics.spo2 = 0;
-                        simData.metrics.respiratoryRate = 0;
+                        newMetrics = { ...newMetrics, bloodPressure: { systolic: 0, diastolic: 0 }, spo2: 0, respiratoryRate: 0 };
                     }
-
-                    // Check for new alerts
+                    newSimData.metrics = newMetrics;
+                    
                     const checkAlert = (metric: string, value: number, thresholds: any, personalizedThresholds: any, severity: AlertSeverity, type: 'low' | 'high') => {
                         const gt = thresholds;
                         const pt = personalizedThresholds;
                         let threshold;
-                        if (type === 'low') {
-                            threshold = pt?.lowCritical ?? gt.LOW_CRITICAL;
-                            if (severity === AlertSeverity.WARNING) threshold = pt?.lowWarning ?? gt.LOW_WARNING;
-                        } else {
-                            threshold = pt?.highCritical ?? gt.HIGH_CRITICAL;
-                             if (severity === AlertSeverity.WARNING) threshold = pt?.highWarning ?? gt.HIGH_WARNING;
-                        }
+                        if (type === 'low') threshold = severity === AlertSeverity.WARNING ? (pt?.lowWarning ?? gt.LOW_WARNING) : (pt?.lowCritical ?? gt.LOW_CRITICAL);
+                        else threshold = severity === AlertSeverity.WARNING ? (pt?.highWarning ?? gt.HIGH_WARNING) : (pt?.highCritical ?? gt.HIGH_CRITICAL);
+                        
                         const isTriggered = type === 'low' ? value < threshold : value > threshold;
                         if (isTriggered) {
                             const message = `${metric} ${type === 'low' ? 'Low' : 'High'}: ${value}`;
-                            if (!simData.alerts.some(a => a.message === message && a.severity === severity)) {
-                                simData.alerts.push({ id: generateUniqueId(), message, severity, timestamp: new Date(), metric });
+                            if (!newAlerts.some(a => a.message === message && a.severity === severity)) {
+                                newAlerts.push({ id: generateUniqueId(), message, severity, timestamp: new Date(), metric });
                             }
                         }
                     };
                     
-                    checkAlert('Heart Rate', simData.metrics.heartRate, ALERT_THRESHOLDS.HEART_RATE, patient.personalizedThresholds?.heartRate, AlertSeverity.CRITICAL, 'low');
-                    checkAlert('Heart Rate', simData.metrics.heartRate, ALERT_THRESHOLDS.HEART_RATE, patient.personalizedThresholds?.heartRate, AlertSeverity.WARNING, 'low');
-                    checkAlert('Heart Rate', simData.metrics.heartRate, ALERT_THRESHOLDS.HEART_RATE, patient.personalizedThresholds?.heartRate, AlertSeverity.CRITICAL, 'high');
-                    checkAlert('Heart Rate', simData.metrics.heartRate, ALERT_THRESHOLDS.HEART_RATE, patient.personalizedThresholds?.heartRate, AlertSeverity.WARNING, 'high');
-                    checkAlert('SpO2', simData.metrics.spo2, ALERT_THRESHOLDS.SPO2, patient.personalizedThresholds?.spo2, AlertSeverity.CRITICAL, 'low');
-                    checkAlert('SpO2', simData.metrics.spo2, ALERT_THRESHOLDS.SPO2, patient.personalizedThresholds?.spo2, AlertSeverity.WARNING, 'low');
+                    checkAlert('Heart Rate', newMetrics.heartRate, ALERT_THRESHOLDS.HEART_RATE, patient.personalizedThresholds?.heartRate, AlertSeverity.CRITICAL, 'low');
+                    checkAlert('Heart Rate', newMetrics.heartRate, ALERT_THRESHOLDS.HEART_RATE, patient.personalizedThresholds?.heartRate, AlertSeverity.WARNING, 'low');
+                    checkAlert('Heart Rate', newMetrics.heartRate, ALERT_THRESHOLDS.HEART_RATE, patient.personalizedThresholds?.heartRate, AlertSeverity.CRITICAL, 'high');
+                    checkAlert('Heart Rate', newMetrics.heartRate, ALERT_THRESHOLDS.HEART_RATE, patient.personalizedThresholds?.heartRate, AlertSeverity.WARNING, 'high');
+                    checkAlert('SpO₂', newMetrics.spo2, ALERT_THRESHOLDS.SPO2, patient.personalizedThresholds?.spo2, AlertSeverity.CRITICAL, 'low');
+                    checkAlert('SpO₂', newMetrics.spo2, ALERT_THRESHOLDS.SPO2, patient.personalizedThresholds?.spo2, AlertSeverity.WARNING, 'low');
+                    newSimData.alerts = newAlerts;
 
-                    // Log vitals
-                    if (simData.loggedVitals.length === 0 || now - simData.loggedVitals[simData.loggedVitals.length-1].timestamp > AUTO_LOG_VITALS_INTERVAL_SECONDS * 1000) {
-                        simData.loggedVitals.push({ timestamp: now, metrics: simData.metrics });
-                        if(simData.loggedVitals.length > 200) simData.loggedVitals.shift(); // Keep log size reasonable
+                    if (newSimData.loggedVitals.length === 0 || now - newSimData.loggedVitals[newSimData.loggedVitals.length-1].timestamp > AUTO_LOG_VITALS_INTERVAL_SECONDS * 1000) {
+                        const updatedVitals = [...newSimData.loggedVitals, { timestamp: now, metrics: newMetrics }];
+                        if(updatedVitals.length > 200) updatedVitals.shift();
+                        newSimData.loggedVitals = updatedVitals;
                     }
 
-                    // Trigger AI Analysis
-                    if (now - (simData.heartSenseAIState?.lastAnalyzedTimestamp || 0) > HEARTSENSE_AI_ANALYSIS_INTERVAL_MS) {
-                        runHeartSenseAIAnalysis(patient, simData);
+                    if (now - (newSimData.heartSenseAIState?.lastAnalyzedTimestamp || 0) > HEARTSENSE_AI_ANALYSIS_INTERVAL_MS) {
+                        runHeartSenseAIAnalysis(patient, newSimData);
                     }
                     
-                    newMap.set(patient.id, simData);
-                });
+                    newMap.set(patientId, newSimData);
+                }
                 return newMap;
             });
         }, SIMULATION_VITALS_INTERVAL_MS);
@@ -517,51 +525,26 @@ export const useCardiacDataSimulator = (organizationName?: string | null): Cardi
     }, []);
 
     const deletePatient = useCallback((patientId: string) => {
-        // This function is designed to be robust by using functional state updates,
-        // which prevents issues with stale state and ensures reliable deletion.
-
-        // Functional update for the simulation data map
+        // Use functional updates to prevent race conditions and stale state.
         setSimulationDataMap(prevMap => {
             const newMap = new Map(prevMap);
-            // .delete returns true if an element was successfully removed
-            if (!newMap.delete(patientId)) {
-                console.warn(`Delete warning: Sim data for patient ID ${patientId} not found in map.`);
-            }
+            newMap.delete(patientId);
             return newMap;
         });
 
-        // Functional update for the patients list
         setPatients(prevPatients => {
-            const patientIndex = prevPatients.findIndex(p => p.id === patientId);
-            if (patientIndex === -1) {
-                console.warn(`Delete failed: Patient with ID ${patientId} not found in list.`);
-                return prevPatients; // Patient not found, do nothing to the list
-            }
-
-            const updatedPatients = prevPatients.filter(p => p.id !== patientId);
-
-            // Functional update for the selected patient ID to ensure atomicity
+            const newPatients = prevPatients.filter(p => p.id !== patientId);
+            
             setSelectedPatientId(prevSelectedId => {
-                // Only update selection if the deleted patient was the selected one
-                if (prevSelectedId !== patientId) {
-                    return prevSelectedId;
+                if (prevSelectedId === patientId) {
+                    return newPatients.length > 0 ? newPatients[0].id : null;
                 }
-                
-                // If it was the selected patient, find the next one
-                if (updatedPatients.length > 0) {
-                    // Select the patient at the same index, or the new last patient
-                    const newIndex = Math.min(patientIndex, updatedPatients.length - 1);
-                    return updatedPatients[newIndex].id;
-                }
-                
-                // No patients left
-                return null;
+                return prevSelectedId;
             });
 
-            return updatedPatients;
+            return newPatients;
         });
-    }, []); // No dependencies are needed as the function relies entirely on functional updates.
-
+    }, []);
 
     const selectPatient = useCallback((patientId: string) => {
         setSelectedPatientId(patientId);
@@ -615,20 +598,25 @@ export const useCardiacDataSimulator = (organizationName?: string | null): Cardi
         setPatients(prev => prev.map(p => p.id === patientId ? { ...p, noiseSignatures: signatures } : p));
     }, []);
 
-    const provideAlarmFeedback = useCallback((patientId: string, feedbackType: Omit<AlarmFeedbackType, 'not_reviewed'>) => {
+    const provideAlarmFeedback = useCallback((patientId: string, feedbackType: Omit<AlarmFeedbackType, 'not_reviewed'>, alertSeverity: AlertSeverity) => {
          setSimulationDataMap(prev => {
             const newMap = new Map(prev);
             const simData = newMap.get(patientId);
             if (simData) {
-                const newSimData = { 
-                    ...JSON.parse(JSON.stringify(simData)), 
-                    acknowledgedAlertIds: new Set(simData.acknowledgedAlertIds) 
-                };
+                let newSimData = { ...simData };
+                let newAlarmFeedbackLog = [...newSimData.alarmFeedbackLog];
+                let newAcknowledgedAlertIds = new Set(newSimData.acknowledgedAlertIds);
+                let shouldReconnectLead = false; // Flag to track if we're dealing with a lead off alert
                 
-                const unacknowledgedWarningAlerts = newSimData.alerts
-                    .filter((a: Alert) => a.severity === AlertSeverity.WARNING && !newSimData.acknowledgedAlertIds.has(a.id));
+                const unacknowledgedAlerts = newSimData.alerts
+                    .filter((a: Alert) => a.severity === alertSeverity && !newAcknowledgedAlertIds.has(a.id));
 
-                unacknowledgedWarningAlerts.forEach((alert: Alert) => {
+                unacknowledgedAlerts.forEach((alert: Alert) => {
+                    // If this is the lead off alert, set the flag.
+                    if (alert.message === 'ECG Lead Off') {
+                        shouldReconnectLead = true;
+                    }
+
                     const feedbackEntry: AlarmFeedbackEntry = {
                         id: generateUniqueId(),
                         patientId,
@@ -641,10 +629,51 @@ export const useCardiacDataSimulator = (organizationName?: string | null): Cardi
                         feedback: feedbackType,
                         feedbackTimestamp: Date.now(),
                     };
-                    newSimData.alarmFeedbackLog.push(feedbackEntry);
-                    newSimData.acknowledgedAlertIds.add(alert.id);
+                    newAlarmFeedbackLog.push(feedbackEntry);
+                    newAcknowledgedAlertIds.add(alert.id);
                 });
+                
+                // Update the feedback log and acknowledged IDs
+                newSimData = { ...newSimData, alarmFeedbackLog: newAlarmFeedbackLog, acknowledgedAlertIds: newAcknowledgedAlertIds };
+                
+                // If the lead off alert was acknowledged, update the simulation state
+                if (shouldReconnectLead) {
+                    newSimData.isLeadOff = false;
+                    // Also remove the alert from the active list for a clean state
+                    newSimData.alerts = newSimData.alerts.filter(a => a.message !== 'ECG Lead Off');
+                }
 
+                newMap.set(patientId, newSimData);
+            }
+            return newMap;
+        });
+    }, []);
+
+    const toggleEcgLeadOff = useCallback((patientId: string) => {
+        setSimulationDataMap(prev => {
+            const newMap = new Map(prev);
+            const simData = newMap.get(patientId);
+            if (simData) {
+                const newIsLeadOff = !simData.isLeadOff;
+                let newAlerts = [...simData.alerts];
+                
+                if (newIsLeadOff) {
+                    // Add lead off alert if it doesn't exist
+                    if (!newAlerts.some(a => a.message === 'ECG Lead Off')) {
+                        newAlerts.push({
+                            id: generateUniqueId(),
+                            message: 'ECG Lead Off',
+                            severity: AlertSeverity.CRITICAL,
+                            timestamp: new Date(),
+                            metric: 'ECG'
+                        });
+                    }
+                } else {
+                    // Remove lead off alert
+                    newAlerts = newAlerts.filter(a => a.message !== 'ECG Lead Off');
+                }
+
+                const newSimData = { ...simData, isLeadOff: newIsLeadOff, alerts: newAlerts };
                 newMap.set(patientId, newSimData);
             }
             return newMap;
@@ -666,5 +695,6 @@ export const useCardiacDataSimulator = (organizationName?: string | null): Cardi
         updatePatientPacingSettings,
         updatePatientNoiseSignatures,
         provideAlarmFeedback,
+        toggleEcgLeadOff,
     };
 };

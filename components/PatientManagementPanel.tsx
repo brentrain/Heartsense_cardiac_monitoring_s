@@ -16,7 +16,7 @@ const PatientManagementPanel: React.FC<PatientManagementPanelProps> = ({
   onSelectPatient,
 }) => {
   const handlePanelDelete = (patientId: string, patientName: string) => {
-    if (window.confirm(`Are you sure you want to delete patient ${patientName}? This action cannot be undone.`)) {
+    if (window.confirm("Are you sure you want to delete this patient? All data will be lost.")) {
       onDeletePatient(patientId);
     }
   };
